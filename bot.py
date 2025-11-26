@@ -25,6 +25,14 @@ from pydrive2.drive import GoogleDrive
 # Local folder where PDFs will be stored (downloaded from Drive)
 PDF_FOLDER = Path("pdfs")
 
+# Folder & files for logs
+LOG_FOLDER = Path("logs")
+RATING_LOG = LOG_FOLDER / "ratings.txt"
+FEEDBACK_LOG = LOG_FOLDER / "feedback.txt"
+
+# For feedback messages
+FEEDBACK_PREFIX = "FB:"
+
 
 def get_drive_folder_id() -> str:
     folder_id = os.getenv("DRIVE_FOLDER_ID")
@@ -36,14 +44,47 @@ def get_drive_folder_id() -> str:
     return folder_id
 
 
+# ===================== LOGGING HELPERS ===================== #
+
+def ensure_log_folder():
+    LOG_FOLDER.mkdir(exist_ok=True)
+
+
+def log_rating(user, rating: str):
+    ensure_log_folder()
+    username = user.username or ""
+    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    line = (
+        f"{datetime.now().isoformat()} | user_id={user.id} | "
+        f"name={full_name} | username={username} | rating={rating}\n"
+    )
+    with open(RATING_LOG, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
+def log_feedback(user, feedback: str):
+    ensure_log_folder()
+    username = user.username or ""
+    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    line = (
+        f"{datetime.now().isoformat()} | user_id={user.id} | "
+        f"name={full_name} | username={username} | feedback={feedback}\n"
+    )
+    with open(FEEDBACK_LOG, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
 # ===================== GOOGLE DRIVE SYNC ===================== #
 
-def sync_pdfs_from_drive():
+def sync_pdfs_from_drive() -> bool:
     """
     Sync all PDFs from a specific Google Drive folder into the local `pdfs` folder.
     - Creates `pdfs/` if it doesn't exist
     - Removes old PDFs in `pdfs/`
     - Downloads all current PDFs from the Drive folder
+    Returns:
+        True  -> at least one PDF found & synced
+        False -> no PDFs in Drive folder
     """
     print("🔁 Syncing PDFs from Google Drive...")
     PDF_FOLDER.mkdir(exist_ok=True)
@@ -84,8 +125,10 @@ def sync_pdfs_from_drive():
         except Exception as e:
             print(f"⚠️ Could not delete {local_pdf}: {e}")
 
+    # If no PDFs in Drive folder, signal it
     if not file_list:
         print("⚠️ No PDFs found in the Drive folder.")
+        return False
 
     # Download each PDF
     for gfile in file_list:
@@ -95,6 +138,7 @@ def sync_pdfs_from_drive():
         gfile.GetContentFile(str(local_path))
 
     print("✅ PDF sync finished.")
+    return True
 
 
 # ===================== PDF PARSING HELPERS ===================== #
@@ -282,12 +326,19 @@ def extract_all_section_infos(folder: Path, section_code: str):
 def format_section_infos(section_code: str) -> str:
     # 🔁 Always sync latest PDFs from Google Drive before searching
     try:
-        sync_pdfs_from_drive()
+        has_files = sync_pdfs_from_drive()
     except Exception as e:
         return (
             "⚠️ Failed to sync PDFs from Google Drive.\n"
             f"Error: `{e}`\n"
             "Make sure `client_secrets.json`, `settings.yaml`, and `DRIVE_FOLDER_ID` are set correctly."
+        )
+
+    # If there are no PDFs at all in Drive
+    if not has_files:
+        return (
+            "🛠️ Maintenance ongoing or routine coming soon.\n"
+            "Currently no routine PDF files are available in the system."
         )
 
     infos = extract_all_section_infos(PDF_FOLDER, section_code)
@@ -325,33 +376,101 @@ def format_section_infos(section_code: str) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "👋 Hi! Send me your *section code*.\n\n"
-        "Example:\n"
-        "`66_A`\n"
-        "`69_K`\n"
-        "`64_B`\n\n"
-        "I'll sync the latest PDFs from Google Drive and show you the exam info."
+        "👋 Hi, I am *MR ROUTINE*.\n"
+        "Welcome! I can find your exam routine by section.\n\n"
+        "👉 Just send me your *section code* in this format:\n"
+        "`66_A`, `69_K`, `64_B`, etc.\n\n"
+        "I'll sync the latest PDFs from Google Drive and show you the exam info.\n"
+        "Use /info to learn more about this bot."
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "ℹ️ *MR ROUTINE — Bot Info*\n\n"
+        "This bot was developed to quickly find exam routines for specific sections by reading "
+        "official PDF routine files from Google Drive.\n\n"
+        "🔧 *How it works*\n"
+        "- Syncs the latest routine PDFs from a Drive folder\n"
+        "- Scans them for your section code (like `66_A`)\n"
+        "- Extracts date, time slot, course, teacher, rooms and total seats\n\n"
+        "⚠️ *Disclaimer*\n"
+        "- The bot may make mistakes while reading PDFs.\n"
+        "- Always double-check with the official routine from your department.\n\n"
+        "© MR ROUTINE\n"
+        "👨‍💻 Developer: Sifatur Rahman (SR iMrAN)\n"
+        "This bot is made for educational and personal use to save time before exams."
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def handle_section(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
     section_input = (update.message.text or "").strip().upper()
+
+    # ----- Rating handling -----
+    if re.fullmatch(r"[1-5]\*", section_input):
+
+        # log rating
+        log_rating(user, section_input)
+        await update.message.reply_text(
+            f"🙏 Thank you for rating MR ROUTINE {section_input}!"
+        )
+        return
+
+    # ----- Feedback handling -----
+    if section_input.startswith(FEEDBACK_PREFIX):
+        feedback = section_input[len(FEEDBACK_PREFIX):].strip()
+        if not feedback:
+            await update.message.reply_text(
+                "✍️ Please write your feedback after `FB:`.\n"
+                "Example: `FB: Please also add day-wise filter.`",
+                parse_mode="Markdown",
+            )
+        else:
+            log_feedback(user, feedback)
+            await update.message.reply_text(
+                "💌 Thanks for your feedback! It has been noted."
+            )
+        return
+
+    # ----- Section handling -----
 
     # basic validation: must look like NN_X
     if not re.fullmatch(r"\d{2}_[A-Z]", section_input):
         await update.message.reply_text(
-            "⚠️ Please send a valid section code like `66_A` or `69_K`.",
+            "⚠️ Please send a valid section code like `66_A` or `69_K`.\n\n"
+            "For feedback, start your message with `FB:`.\n"
+           "For rating, reply with `1*`, `2*`, `3*`, `4*` or `5*`.",
+
             parse_mode="Markdown",
         )
         return
 
-    await update.message.reply_text("🔍 Syncing PDFs & searching, please wait...")
+    await update.message.reply_text(
+        "🔍 Syncing PDFs & searching, please wait...\n\n"
+        "⚠️ *Disclaimer:* This bot may make mistakes while reading PDFs. "
+        "Always double-check with the official routine.",
+        parse_mode="Markdown",
+    )
 
     # run the heavy PDF + Drive work in a separate thread
     result_text = await asyncio.to_thread(format_section_infos, section_input)
 
     await update.message.reply_text(result_text, parse_mode="Markdown")
+
+    # Thank you + rating/feedback options
+    thank_text = (
+        "🙏 *Thank you for using MR ROUTINE!*🫶\n\n"
+        "⭐ * Rating:*\n"
+       "Reply with `1*`, `2*`, `3*`, `4*` or `5*` to rate this bot.\n\n"
+        "💬 * Feedback:*\n"
+        "Send a message starting with `FB:` followed by your feedback or Some problem found.\n"
+        "Example:\n"
+        "`FB: Please also add day-wise filter.`"
+    )
+    await update.message.reply_text(thank_text, parse_mode="Markdown")
 
 
 def main():
@@ -364,6 +483,7 @@ def main():
     application = ApplicationBuilder().token(token).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("info", info))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_section))
 
     print("Bot is running...")
