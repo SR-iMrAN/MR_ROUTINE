@@ -53,9 +53,7 @@ def ensure_log_folder():
 def log_rating(user, rating: str):
     ensure_log_folder()
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Unknown"
-
     line = f"{datetime.now().isoformat()} | name={full_name} | rating={rating}\n"
-
     with open(RATING_LOG, "a", encoding="utf-8") as f:
         f.write(line)
 
@@ -63,9 +61,7 @@ def log_rating(user, rating: str):
 def log_feedback(user, feedback: str):
     ensure_log_folder()
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Unknown"
-
     line = f"{datetime.now().isoformat()} | name={full_name} | feedback={feedback}\n"
-
     with open(FEEDBACK_LOG, "a", encoding="utf-8") as f:
         f.write(line)
 
@@ -104,32 +100,44 @@ def sync_pdfs_from_drive() -> bool:
     print("🔁 Syncing PDFs from Google Drive...")
     PDF_FOLDER.mkdir(exist_ok=True)
 
-    gauth = GoogleAuth()  # uses settings.yaml automatically
-
-    # Detect cloud vs local using WEBHOOK_URL
     running_in_cloud = bool(os.getenv("WEBHOOK_URL"))
 
-    # In cloud, completely disable saving credentials (read-only FS).
+    # Paths for secrets/credentials
     if running_in_cloud:
-        def _no_save_credentials_file(filename: str):
-            print(f"⚠️ Skipping SaveCredentialsFile('{filename}') on read-only filesystem")
-        gauth.SaveCredentialsFile = _no_save_credentials_file  # monkey-patch
+        client_secrets_path = "/workspace/client_secrets.json"
+        credentials_path = "/workspace/credentials.json"
+    else:
+        client_secrets_path = "client_secrets.json"
+        credentials_path = "credentials.json"
 
-    # Try to load existing credentials
+    # Build settings explicitly instead of settings.yaml
+    settings = {
+        "client_config_backend": "file",
+        "client_config_file": client_secrets_path,
+        "oauth_scope": ["https://www.googleapis.com/auth/drive.readonly"],
+        "save_credentials": not running_in_cloud,  # never save in cloud
+        "save_credentials_backend": "file",
+        "save_credentials_file": credentials_path,
+        "get_refresh_token": True,
+    }
+
+    gauth = GoogleAuth(settings=settings)
+
+    # Load credentials if file exists
     try:
-        gauth.LoadCredentialsFile("credentials.json")
+        gauth.LoadCredentialsFile(credentials_path)
     except Exception as e:
-        print(f"⚠️ Could not load credentials.json: {e}")
+        print(f"⚠️ Could not load credentials file {credentials_path}: {e}")
 
     if gauth.credentials is None:
         if running_in_cloud:
-            # In cloud: we expect credentials.json to be mounted & readable already.
+            # In cloud we expect credentials.json to be mounted already
             raise RuntimeError(
-                "No valid Google Drive credentials found in this cloud environment. "
-                "Ensure 'credentials.json' is correctly mounted (e.g. via Choreo config)."
+                f"Google Drive credentials not available at {credentials_path}. "
+                "Check your Choreo config mount."
             )
         else:
-            # Local dev: do browser auth once
+            # Local dev: open browser once
             print("🌐 No credentials found, running LocalWebserverAuth (LOCAL USE ONLY)...")
             gauth.LocalWebserverAuth()
     elif gauth.access_token_expired:
@@ -139,10 +147,10 @@ def sync_pdfs_from_drive() -> bool:
         print("✅ Credentials loaded, authorizing...")
         gauth.Authorize()
 
-    # Locally you can save refreshed credentials; in cloud we skip (read-only).
+    # Only save locally; never in cloud (read-only / config map)
     if not running_in_cloud:
         try:
-            gauth.SaveCredentialsFile("credentials.json")
+            gauth.SaveCredentialsFile(credentials_path)
         except Exception as e:
             print(f"⚠️ Could not save credentials locally: {e}")
 
