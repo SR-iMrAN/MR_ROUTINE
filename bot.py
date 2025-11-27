@@ -111,19 +111,17 @@ def sync_pdfs_from_drive() -> bool:
     except Exception:
         pass
 
-    # Detect cloud vs local using WEBHOOK_URL
     running_in_cloud = bool(os.getenv("WEBHOOK_URL"))
 
     if gauth.credentials is None:
         if running_in_cloud:
-            # ❌ In cloud: DO NOT call LocalWebserverAuth (will hang)
+            # In cloud we expect a bundled credentials.json; if it's missing, fail clearly.
             raise RuntimeError(
-                "No Google Drive credentials found in this cloud environment. "
-                "Please generate 'credentials.json' locally and mount/include it in the deployment, "
-                "or switch to a service account–based auth."
+                "No valid Google Drive credentials found in this cloud environment. "
+                "Ensure 'credentials.json' is included in the image or mount it."
             )
         else:
-            # ✅ Local dev: can use LocalWebserverAuth
+            # Local dev: can use browser auth
             print("🌐 No credentials found, running LocalWebserverAuth (LOCAL USE ONLY)...")
             gauth.LocalWebserverAuth()
     elif gauth.access_token_expired:
@@ -133,7 +131,11 @@ def sync_pdfs_from_drive() -> bool:
         print("✅ Credentials loaded, authorizing...")
         gauth.Authorize()
 
-    gauth.SaveCredentialsFile("credentials.json")
+    # In Choreo the root FS is read-only, so saving may fail.
+    try:
+        gauth.SaveCredentialsFile("credentials.json")
+    except Exception as e:
+        print(f"⚠️ Could not save credentials (probably read-only FS): {e}")
 
     drive = GoogleDrive(gauth)
     folder_id = get_drive_folder_id()
@@ -528,6 +530,7 @@ async def handle_section(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # ===================== TELEGRAM BOT ENTRYPOINT ===================== #
+
 def main():
     load_dotenv()
 
@@ -541,9 +544,23 @@ def main():
     application.add_handler(CommandHandler("info", info))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_section))
 
-    # Just run polling, no webhook
-    print("Running in POLLING mode (no webhook)...")
-    application.run_polling()
+    webhook_url = os.getenv("WEBHOOK_URL")  # e.g. https://.../default/mrroutine/v1.0
+    port = int(os.getenv("PORT", "8000"))
+
+    if webhook_url:
+        # ▶ Choreo / webhook mode
+        print(f"Webhook mode enabled -> {webhook_url}")
+
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=token,  # internal path (ServicePath="/<token>")
+            webhook_url=f"{webhook_url.rstrip('/')}/{token}",  # public Telegram URL
+        )
+    else:
+        # ▶ Local dev mode (polling)
+        print("WEBHOOK_URL not found -> running in POLLING mode (local test)")
+        application.run_polling()
 
 
 if __name__ == "__main__":
