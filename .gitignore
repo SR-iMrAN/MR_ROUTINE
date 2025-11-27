@@ -1,3 +1,6 @@
 client_secrets.json
 credentials.json
 .env
+logs
+ratings.txt
+feedback.txt

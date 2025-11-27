@@ -7,7 +7,7 @@ import asyncio
 import pdfplumber
 from dotenv import load_dotenv
 
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -72,6 +72,29 @@ def log_feedback(user, feedback: str):
     )
     with open(FEEDBACK_LOG, "a", encoding="utf-8") as f:
         f.write(line)
+
+
+# ===================== TELEGRAM KEYBOARDS ===================== #
+
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton("📋 MENU"), KeyboardButton("ℹ️ INFO")],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def rating_keyboard() -> ReplyKeyboardMarkup:
+    # Buttons send "1*", "2*", ..., "5*"
+    keyboard = [[KeyboardButton(f"{i}*") for i in range(1, 6)]]
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
 
 
 # ===================== GOOGLE DRIVE SYNC ===================== #
@@ -145,23 +168,36 @@ def sync_pdfs_from_drive() -> bool:
 
 def parse_time(text: str) -> str:
     """
-    Extracts: Slot B (11:30 AM - 01:00 PM)
-    from: 'Date: 05-11-2025 Slot: B (11:30 AM - 01:00 PM)'
+    Try to extract something like:
+      Slot B (11:30 AM - 01:00 PM)
+    or:
+      Slot B 11:30 AM - 01:00 PM
+    from arbitrary text.
     """
-    m = re.search(r"Slot:\s*([A-Z])\s*\(([^)]+)\)", text)
-    if not m:
-        return ""
-    return f"Slot {m.group(1)} ({m.group(2)})"
+    # Pattern 1: Slot B (11:30 AM - 01:00 PM)
+    m = re.search(r"Slot\s*:?\.?\s*([A-Z])\s*\(([^)]+)\)", text, re.IGNORECASE)
+    if m:
+        return f"Slot {m.group(1).upper()} ({m.group(2).strip()})"
+
+    # Pattern 2: Slot B 11:30 AM - 01:00 PM
+    m = re.search(
+        r"Slot\s*:?\.?\s*([A-Z])\s+([0-9]{1,2}:[0-9]{2}\s*[AP]M\s*[-–]\s*[0-9]{1,2}:[0-9]{2}\s*[AP]M)",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return f"Slot {m.group(1).upper()} ({m.group(2).strip()})"
+
+    return ""
 
 
 def parse_date(text: str) -> str:
     """
     Extracts date and converts to: 05-11-2025 (Wednesday)
 
-    Looks for: Date: 05-11-2025
-               or Date: 05/11/2025
+    Looks for: Date: 05-11-2025 or Date: 05/11/2025
     """
-    m = re.search(r"Date:\s*([0-9]{2}[-/][0-9]{2}[-/][0-9]{4})", text)
+    m = re.search(r"Date\s*:\s*([0-9]{2}[-/][0-9]{2}[-/][0-9]{4})", text, re.IGNORECASE)
     if not m:
         return ""
 
@@ -173,6 +209,38 @@ def parse_date(text: str) -> str:
     except ValueError:
         # if parsing fails, just return the raw date
         return date_raw
+
+
+def parse_exam_type(text: str) -> str:
+    """
+    Detects whether the PDF is for Midterm / Final / Improvement etc.
+    Tries to be robust to spacing and capitalization.
+    """
+    # normalize whitespace + lowercase
+    t = " ".join((text or "").lower().split())
+    if not t:
+        return ""
+
+    # Final exam / final examination / term final etc.
+    if (
+        "final" in t
+        and ("exam" in t or "examination" in t or "term final" in t or "final term" in t)
+    ):
+        return "Final Examination"
+
+    # Midterm / mid-term / mid term examination
+    if (
+        ("mid" in t or "midterm" in t or "mid-term" in t or "mid term" in t)
+        and ("exam" in t or "examination" in t or "mid term" in t or "term mid" in t)
+    ):
+        return "Midterm Examination"
+
+    # Improvement / makeup / supplementary
+    if any(word in t for word in ["improvement", "improve", "makeup", "make-up", "supplementary"]):
+        return "Improvement / Makeup Examination"
+
+    return ""
+
 
 
 def parse_course_info(text: str, section_prefix: str):
@@ -230,12 +298,18 @@ def extract_all_section_infos(folder: Path, section_code: str):
 
     for pdf_path in folder.glob("*.pdf"):
         with pdfplumber.open(pdf_path) as pdf:
-            time_str = ""
+            time_str = ""      # last seen slot in this file
             date_str = ""
             course_name = ""
             course_id = ""
+            exam_type = ""
 
             num_pages = len(pdf.pages)
+
+            # Try to detect exam type from first page header
+            if num_pages > 0:
+                first_text = pdf.pages[0].extract_text() or ""
+                exam_type = parse_exam_type(first_text)
 
             # use index so we can also look at next page (for split sections)
             for page_index in range(num_pages):
@@ -243,12 +317,17 @@ def extract_all_section_infos(folder: Path, section_code: str):
                 text = page.extract_text() or ""
 
                 # date once per file
-                if "Date:" in text and not date_str:
-                    date_str = parse_date(text)
+                if "date" in text.lower() and not date_str:
+                    maybe_date = parse_date(text)
+                    if maybe_date:
+                        date_str = maybe_date
 
-                # time once per file (slot)
-                if "Slot:" in text and not time_str:
-                    time_str = parse_time(text)
+                # 🔹 UPDATED TIME LOGIC (per page / group)
+                if "slot" in text.lower():
+                    maybe_time = parse_time(text)
+                    if maybe_time:
+                        time_str = maybe_time   # update last seen slot
+                page_time_str = time_str       # slot for THIS page
 
                 # course info once per file
                 if not course_id:
@@ -309,13 +388,14 @@ def extract_all_section_infos(folder: Path, section_code: str):
                 if rooms and teacher:
                     results.append({
                         "date": date_str,
-                        "time": time_str,
+                        "time": page_time_str,   # ✅ page-specific slot
                         "section": section_code,
                         "teacher": teacher,
                         "rooms": rooms,
                         "total": total_seats,
                         "course_name": course_name,
                         "course_id": course_id,
+                        "exam_type": exam_type,
                     })
                     # assume one occurrence of this section per file
                     break
@@ -348,14 +428,27 @@ def format_section_infos(section_code: str) -> str:
 
     blocks = []
 
-    for info in infos:
+    # serials: (i), (ii), (iii) ...
+    roman_map = {1: "i", 2: "ii", 3: "iii", 4: "iv", 5: "v", 6: "vi", 7: "vii", 8: "viii", 9: "ix", 10: "x"}
+
+    for idx, info in enumerate(infos, start=1):
+        roman = roman_map.get(idx, str(idx))
         block = []
-        block.append(f"======== 📚 SECTION `{info['section']}` =======")
+        block.append(f"({roman}) ==== 📚 SECTION `{info['section']}` ====")
+
+        # Exam type if detected
+        if info.get("exam_type"):
+            block.append(f"📝 Exam: {info['exam_type']}")
+
         if info["date"]:
             block.append(f"📅 Date: {info['date']}")
         else:
             block.append("📅 Date: (not found)")
-        block.append(f"⏰ {info['time']}\n")
+
+        if info["time"]:
+            block.append(f"⏰ {info['time']}\n")
+        else:
+            block.append("⏰ Time / Slot: (not found)\n")
 
         block.append(f"📘 Course: {info['course_name']} ({info['course_id']})")
         block.append(f"👨‍🏫 Teacher: {info['teacher']}\n")
@@ -377,45 +470,57 @@ def format_section_infos(section_code: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "👋 Hi, I am *MR ROUTINE*.\n"
-        "Welcome! I can find your exam routine by section.\n\n"
+        "Welcome! I can find your DIU exam routine by section.\n\n"
         "👉 Just send me your *section code* in this format:\n"
         "`66_A`, `69_K`, `64_B`, etc.\n\n"
-        "I'll sync the latest PDFs from Google Drive and show you the exam info.\n"
+        "I'll sync the latest routine PDFs and show you the exam info.\n"
         "Use /info to learn more about this bot."
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "ℹ️ *MR ROUTINE — Bot Info*\n\n"
-        "This bot was developed to quickly find exam routines for specific sections by reading "
+        "This bot was developed to quickly find DIU exam routines for specific sections by reading "
         "official PDF routine files from Google Drive.\n\n"
         "🔧 *How it works*\n"
         "- Syncs the latest routine PDFs from a Drive folder\n"
         "- Scans them for your section code (like `66_A`)\n"
-        "- Extracts date, time slot, course, teacher, rooms and total seats\n\n"
+        "- Extracts exam type, date, time slot, course, teacher, rooms and total seats\n\n"
         "⚠️ *Disclaimer*\n"
         "- The bot may make mistakes while reading PDFs.\n"
         "- Always double-check with the official routine from your department.\n\n"
         "© MR ROUTINE\n"
-        "👨‍💻 Developer: Sifatur Rahman (SR iMrAN)\n"
+        "👨‍💻 Developer: Sifatur Rahman iMRAN.\n"
         "This bot is made for educational and personal use to save time before exams."
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 
 async def handle_section(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     section_input = (update.message.text or "").strip().upper()
 
+    # ----- Menu buttons -----
+    if section_input == "📋 MENU":
+        await start(update, context)
+        return
+
+    if section_input == "ℹ️ INFO":
+        await info(update, context)
+        return
+
     # ----- Rating handling -----
     if re.fullmatch(r"[1-5]\*", section_input):
-
-        # log rating
         log_rating(user, section_input)
         await update.message.reply_text(
-            f"🙏 Thank you for rating MR ROUTINE {section_input}!"
+            f"🙏 Thank you for rating MR ROUTINE {section_input}!",
+            reply_markup=main_menu_keyboard(),
         )
         return
 
@@ -431,7 +536,8 @@ async def handle_section(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             log_feedback(user, feedback)
             await update.message.reply_text(
-                "💌 Thanks for your feedback! It has been noted."
+                "💌 Thanks for your feedback! It has been noted.",
+                reply_markup=main_menu_keyboard(),
             )
         return
 
@@ -442,9 +548,9 @@ async def handle_section(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(
             "⚠️ Please send a valid section code like `66_A` or `69_K`.\n\n"
             "For feedback, start your message with `FB:`.\n"
-           "For rating, reply with `1*`, `2*`, `3*`, `4*` or `5*`.",
-
+            "For rating, reply with `1*`, `2*`, `3*`, `4*` or `5*`.",
             parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
         )
         return
 
@@ -462,15 +568,19 @@ async def handle_section(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Thank you + rating/feedback options
     thank_text = (
-        "🙏 *Thank you for using MR ROUTINE!*🫶\n\n"
-        "⭐ * Rating:*\n"
-       "Reply with `1*`, `2*`, `3*`, `4*` or `5*` to rate this bot.\n\n"
-        "💬 * Feedback:*\n"
-        "Send a message starting with `FB:` followed by your feedback or Some problem found.\n"
+        "🙏 *Thank you for using MR ROUTINE!* 🫶\n\n"
+        "⭐ *Rating:*\n"
+        "Tap a button or reply with `1*`, `2*`, `3*`, `4*` or `5*` to rate this bot.\n\n"
+        "💬 *Feedback:*\n"
+        "Send a message starting with `FB:` followed by your feedback.\n"
         "Example:\n"
-        "`FB: Please also add day-wise filter.`"
+        "`FB: Please also add day-wise filter or some problem found.`"
     )
-    await update.message.reply_text(thank_text, parse_mode="Markdown")
+    await update.message.reply_text(
+        thank_text,
+        parse_mode="Markdown",
+        reply_markup=rating_keyboard(),
+    )
 
 
 def main():
