@@ -563,28 +563,15 @@ def main():
     if not token:
         raise RuntimeError("BOT_TOKEN not found in environment variables")
 
-    webhook_url = os.getenv("WEBHOOK_URL")
-    port = int(os.getenv("PORT", "8000"))
-
     application = ApplicationBuilder().token(token).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("info", info))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_section))
 
-    # ✅ If WEBHOOK_URL exists → use webhook (for Choreo)
-    if webhook_url:
-        print(f"Webhook mode enabled -> {webhook_url}")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=token,
-            webhook_url=f"{webhook_url}/{token}",
-        )
-    else:
-        # ✅ Local safe mode
-        print("WEBHOOK_URL not found -> running in POLLING mode (local test)")
-        application.run_polling()
+    print("Running MR_ROUTINE in POLLING mode...")
+    application.run_polling()
+
 
 
 if __name__ == "__main__":
