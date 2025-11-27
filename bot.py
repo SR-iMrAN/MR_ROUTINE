@@ -53,7 +53,9 @@ def ensure_log_folder():
 def log_rating(user, rating: str):
     ensure_log_folder()
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Unknown"
+
     line = f"{datetime.now().isoformat()} | name={full_name} | rating={rating}\n"
+
     with open(RATING_LOG, "a", encoding="utf-8") as f:
         f.write(line)
 
@@ -61,7 +63,9 @@ def log_rating(user, rating: str):
 def log_feedback(user, feedback: str):
     ensure_log_folder()
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Unknown"
+
     line = f"{datetime.now().isoformat()} | name={full_name} | feedback={feedback}\n"
+
     with open(FEEDBACK_LOG, "a", encoding="utf-8") as f:
         f.write(line)
 
@@ -102,7 +106,9 @@ def sync_pdfs_from_drive() -> bool:
 
     running_in_cloud = bool(os.getenv("WEBHOOK_URL"))
 
-    # Paths for secrets/credentials
+    # In Choreo screenshots you mounted:
+    #   client_secrets.json  -> /workspace/client_secrets.json
+    #   credentials.json     -> /workspace/credentials.json
     if running_in_cloud:
         client_secrets_path = "/workspace/client_secrets.json"
         credentials_path = "/workspace/credentials.json"
@@ -110,34 +116,35 @@ def sync_pdfs_from_drive() -> bool:
         client_secrets_path = "client_secrets.json"
         credentials_path = "credentials.json"
 
-    # Build settings explicitly instead of settings.yaml
+    # We IGNORE settings.yaml and give PyDrive2 our own settings
     settings = {
         "client_config_backend": "file",
         "client_config_file": client_secrets_path,
         "oauth_scope": ["https://www.googleapis.com/auth/drive.readonly"],
-        "save_credentials": not running_in_cloud,  # never save in cloud
+        "save_credentials": not running_in_cloud,      # NEVER save in cloud
         "save_credentials_backend": "file",
-        "save_credentials_file": credentials_path,
+        "save_credentials_file": credentials_path,     # local only
         "get_refresh_token": True,
     }
 
     gauth = GoogleAuth(settings=settings)
 
-    # Load credentials if file exists
+    # Try to load credentials (if file exists)
     try:
         gauth.LoadCredentialsFile(credentials_path)
+        print(f"Loaded credentials from {credentials_path}")
     except Exception as e:
-        print(f"⚠️ Could not load credentials file {credentials_path}: {e}")
+        print(f"⚠️ Could not load credentials from {credentials_path}: {e}")
 
     if gauth.credentials is None:
         if running_in_cloud:
-            # In cloud we expect credentials.json to be mounted already
+            # In cloud we EXPECT a valid credentials.json already mounted
             raise RuntimeError(
-                f"Google Drive credentials not available at {credentials_path}. "
-                "Check your Choreo config mount."
+                f"No valid Google Drive credentials found at {credentials_path} "
+                "(check your Choreo config / file mount)."
             )
         else:
-            # Local dev: open browser once
+            # Local dev: do browser auth once
             print("🌐 No credentials found, running LocalWebserverAuth (LOCAL USE ONLY)...")
             gauth.LocalWebserverAuth()
     elif gauth.access_token_expired:
@@ -147,12 +154,16 @@ def sync_pdfs_from_drive() -> bool:
         print("✅ Credentials loaded, authorizing...")
         gauth.Authorize()
 
-    # Only save locally; never in cloud (read-only / config map)
+    # Only save refreshed credentials LOCALLY.
     if not running_in_cloud:
         try:
             gauth.SaveCredentialsFile(credentials_path)
+            print(f"Saved credentials to {credentials_path}")
         except Exception as e:
             print(f"⚠️ Could not save credentials locally: {e}")
+
+    # IMPORTANT: in cloud we never call SaveCredentialsFile,
+    # so there is no [Errno 30] read-only error anymore.
 
     drive = GoogleDrive(gauth)
     folder_id = get_drive_folder_id()
@@ -378,8 +389,8 @@ def format_section_infos(section_code: str) -> str:
         return (
             "⚠️ Failed to sync PDFs from Google Drive.\n"
             f"Error: `{e}`\n"
-            "Make sure `client_secrets.json`, `settings.yaml`, credentials, "
-            "and `DRIVE_FOLDER_ID` are configured correctly."
+            "Make sure Google Drive client secrets, credentials, and "
+            "`DRIVE_FOLDER_ID` are configured correctly."
         )
 
     if not has_files:
