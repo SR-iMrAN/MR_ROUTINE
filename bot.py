@@ -49,13 +49,12 @@ def get_drive_folder_id() -> str:
 def ensure_log_folder():
     LOG_FOLDER.mkdir(exist_ok=True)
 
+
 def log_rating(user, rating: str):
     ensure_log_folder()
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Unknown"
 
-    line = (
-        f"{datetime.now().isoformat()} | name={full_name} | rating={rating}\n"
-    )
+    line = f"{datetime.now().isoformat()} | name={full_name} | rating={rating}\n"
 
     with open(RATING_LOG, "a", encoding="utf-8") as f:
         f.write(line)
@@ -65,13 +64,10 @@ def log_feedback(user, feedback: str):
     ensure_log_folder()
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Unknown"
 
-    line = (
-        f"{datetime.now().isoformat()} | name={full_name} | feedback={feedback}\n"
-    )
+    line = f"{datetime.now().isoformat()} | name={full_name} | feedback={feedback}\n"
 
     with open(FEEDBACK_LOG, "a", encoding="utf-8") as f:
         f.write(line)
-
 
 
 # ===================== TELEGRAM KEYBOARDS ===================== #
@@ -515,7 +511,7 @@ async def handle_section(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "💬 *Feedback:*\n"
         "Send a message starting with `FB:` followed by your feedback.\n"
         "Example:\n"
-        "`FB: Please also add day-wise filter or some problem found.`"
+            "`FB: Please also add day-wise filter or some problem found.`"
     )
     await update.message.reply_text(
         thank_text,
@@ -524,38 +520,6 @@ async def handle_section(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
-# def main():
-    # For local dev: load .env. On Choreo you set envs in console.
-    load_dotenv()
-
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("BOT_TOKEN not found in environment variables")
-
-    # Public base URL of your Choreo service, e.g. https://mr-routine-xyz.choreo.dev
-    base_url = os.getenv("WEBHOOK_URL")
-    if not base_url:
-        raise RuntimeError(
-            "WEBHOOK_URL not found in env. "
-            "Set it to your public Choreo URL, e.g. https://mr-routine-xyz.choreo.dev"
-        )
-
-    # Port provided by Choreo (or default for local run)
-    port = int(os.getenv("PORT", "8000"))
-
-    application = ApplicationBuilder().token(token).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("info", info))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_section))
-
-    print(f"Bot webhook starting on 0.0.0.0:{port} ...")
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=token,  # path part
-        webhook_url=f"{base_url}/{token}",  # full HTTPS URL Telegram will call
-    )
 # ===================== TELEGRAM BOT ENTRYPOINT ===================== #
 
 def main():
@@ -571,24 +535,33 @@ def main():
     application.add_handler(CommandHandler("info", info))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_section))
 
-    # Choreo / webhook settings
-    webhook_url = os.getenv("WEBHOOK_URL")
+    webhook_url = os.getenv("WEBHOOK_URL")  # e.g. https://.../default/mrroutine/v1.0
     port = int(os.getenv("PORT", "8000"))
 
     if webhook_url:
         # ▶ Choreo / server mode
         print(f"Webhook mode enabled -> {webhook_url}")
+
+        # Extract the path part from WEBHOOK_URL, e.g. "default/mrroutine/v1.0"
+        without_scheme = webhook_url.split("://", 1)[-1]          # "host/default/mrroutine/v1.0"
+        path_prefix = without_scheme.split("/", 1)[-1]            # "default/mrroutine/v1.0"
+
+        # Full path that the internal web server listens on (no leading slash)
+        full_path_for_server = f"{path_prefix}/{token}"           # "default/mrroutine/v1.0/<token>"
+
+        # Full public URL for Telegram
+        full_public_url = f"{webhook_url.rstrip('/')}/{token}"
+
         application.run_webhook(
             listen="0.0.0.0",
             port=port,
-            url_path=token,
-            webhook_url=f"{webhook_url}/{token}",
+            url_path=full_path_for_server,   # must match the path the gateway uses
+            webhook_url=full_public_url,     # full HTTPS URL Telegram will call
         )
     else:
-        # ▶ Local dev mode
+        # ▶ Local dev mode (polling)
         print("WEBHOOK_URL not found -> running in POLLING mode (local test)")
         application.run_polling()
-
 
 
 if __name__ == "__main__":
