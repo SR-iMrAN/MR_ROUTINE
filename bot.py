@@ -556,6 +556,8 @@ async def handle_section(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         url_path=token,  # path part
         webhook_url=f"{base_url}/{token}",  # full HTTPS URL Telegram will call
     )
+# ===================== TELEGRAM BOT ENTRYPOINT ===================== #
+
 def main():
     load_dotenv()
 
@@ -569,8 +571,23 @@ def main():
     application.add_handler(CommandHandler("info", info))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_section))
 
-    print("Running MR_ROUTINE in POLLING mode...")
-    application.run_polling()
+    # Choreo / webhook settings
+    webhook_url = os.getenv("WEBHOOK_URL")
+    port = int(os.getenv("PORT", "8000"))
+
+    if webhook_url:
+        # ▶ Choreo / server mode
+        print(f"Webhook mode enabled -> {webhook_url}")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=token,
+            webhook_url=f"{webhook_url}/{token}",
+        )
+    else:
+        # ▶ Local dev mode
+        print("WEBHOOK_URL not found -> running in POLLING mode (local test)")
+        application.run_polling()
 
 
 
