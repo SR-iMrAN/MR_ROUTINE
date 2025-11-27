@@ -104,10 +104,6 @@ def sync_pdfs_from_drive() -> bool:
     print("🔁 Syncing PDFs from Google Drive...")
     PDF_FOLDER.mkdir(exist_ok=True)
 
-    # ⚠️ NOTE: LocalWebserverAuth will NOT work on cloud.
-    # On Choreo you should:
-    # - Either pre-generate credentials.json locally and mount it with the app
-    # - Or use a service account-based auth flow.
     gauth = GoogleAuth()  # uses settings.yaml automatically
 
     try:
@@ -115,10 +111,21 @@ def sync_pdfs_from_drive() -> bool:
     except Exception:
         pass
 
+    # Detect cloud vs local using WEBHOOK_URL
+    running_in_cloud = bool(os.getenv("WEBHOOK_URL"))
+
     if gauth.credentials is None:
-        # This flow works on local dev, not in cloud
-        print("🌐 No credentials found, running LocalWebserverAuth (LOCAL USE ONLY)...")
-        gauth.LocalWebserverAuth()
+        if running_in_cloud:
+            # ❌ In cloud: DO NOT call LocalWebserverAuth (will hang)
+            raise RuntimeError(
+                "No Google Drive credentials found in this cloud environment. "
+                "Please generate 'credentials.json' locally and mount/include it in the deployment, "
+                "or switch to a service account–based auth."
+            )
+        else:
+            # ✅ Local dev: can use LocalWebserverAuth
+            print("🌐 No credentials found, running LocalWebserverAuth (LOCAL USE ONLY)...")
+            gauth.LocalWebserverAuth()
     elif gauth.access_token_expired:
         print("🔄 Access token expired, refreshing...")
         gauth.Refresh()
@@ -511,7 +518,7 @@ async def handle_section(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "💬 *Feedback:*\n"
         "Send a message starting with `FB:` followed by your feedback.\n"
         "Example:\n"
-            "`FB: Please also add day-wise filter or some problem found.`"
+        "`FB: Please also add day-wise filter or some problem found.`"
     )
     await update.message.reply_text(
         thank_text,
@@ -539,24 +546,14 @@ def main():
     port = int(os.getenv("PORT", "8000"))
 
     if webhook_url:
-        # ▶ Choreo / server mode
+        # ▶ Choreo / webhook mode
         print(f"Webhook mode enabled -> {webhook_url}")
-
-        # Extract the path part from WEBHOOK_URL, e.g. "default/mrroutine/v1.0"
-        without_scheme = webhook_url.split("://", 1)[-1]          # "host/default/mrroutine/v1.0"
-        path_prefix = without_scheme.split("/", 1)[-1]            # "default/mrroutine/v1.0"
-
-        # Full path that the internal web server listens on (no leading slash)
-        full_path_for_server = f"{path_prefix}/{token}"           # "default/mrroutine/v1.0/<token>"
-
-        # Full public URL for Telegram
-        full_public_url = f"{webhook_url.rstrip('/')}/{token}"
 
         application.run_webhook(
             listen="0.0.0.0",
             port=port,
-            url_path=full_path_for_server,   # must match the path the gateway uses
-            webhook_url=full_public_url,     # full HTTPS URL Telegram will call
+            url_path=token,  # internal path (ServicePath="/<token>")
+            webhook_url=f"{webhook_url.rstrip('/')}/{token}",  # public Telegram URL
         )
     else:
         # ▶ Local dev mode (polling)
