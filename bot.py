@@ -106,22 +106,30 @@ def sync_pdfs_from_drive() -> bool:
 
     gauth = GoogleAuth()  # uses settings.yaml automatically
 
+    # Detect cloud vs local using WEBHOOK_URL
+    running_in_cloud = bool(os.getenv("WEBHOOK_URL"))
+
+    # In cloud, completely disable saving credentials (read-only FS).
+    if running_in_cloud:
+        def _no_save_credentials_file(filename: str):
+            print(f"⚠️ Skipping SaveCredentialsFile('{filename}') on read-only filesystem")
+        gauth.SaveCredentialsFile = _no_save_credentials_file  # monkey-patch
+
+    # Try to load existing credentials
     try:
         gauth.LoadCredentialsFile("credentials.json")
-    except Exception:
-        pass
-
-    running_in_cloud = bool(os.getenv("WEBHOOK_URL"))
+    except Exception as e:
+        print(f"⚠️ Could not load credentials.json: {e}")
 
     if gauth.credentials is None:
         if running_in_cloud:
-            # In cloud we expect a bundled credentials.json; if it's missing, fail clearly.
+            # In cloud: we expect credentials.json to be mounted & readable already.
             raise RuntimeError(
                 "No valid Google Drive credentials found in this cloud environment. "
-                "Ensure 'credentials.json' is included in the image or mount it."
+                "Ensure 'credentials.json' is correctly mounted (e.g. via Choreo config)."
             )
         else:
-            # Local dev: can use browser auth
+            # Local dev: do browser auth once
             print("🌐 No credentials found, running LocalWebserverAuth (LOCAL USE ONLY)...")
             gauth.LocalWebserverAuth()
     elif gauth.access_token_expired:
@@ -131,11 +139,12 @@ def sync_pdfs_from_drive() -> bool:
         print("✅ Credentials loaded, authorizing...")
         gauth.Authorize()
 
-    # In Choreo the root FS is read-only, so saving may fail.
-    try:
-        gauth.SaveCredentialsFile("credentials.json")
-    except Exception as e:
-        print(f"⚠️ Could not save credentials (probably read-only FS): {e}")
+    # Locally you can save refreshed credentials; in cloud we skip (read-only).
+    if not running_in_cloud:
+        try:
+            gauth.SaveCredentialsFile("credentials.json")
+        except Exception as e:
+            print(f"⚠️ Could not save credentials locally: {e}")
 
     drive = GoogleDrive(gauth)
     folder_id = get_drive_folder_id()
