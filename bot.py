@@ -16,21 +16,17 @@ from telegram.ext import (
     filters,
 )
 
-# Google Drive imports
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
 # ===================== CONFIG ===================== #
 
-# Local folder where PDFs will be stored (downloaded from Drive)
 PDF_FOLDER = Path("pdfs")
 
-# Folder & files for logs
 LOG_FOLDER = Path("logs")
 RATING_LOG = LOG_FOLDER / "ratings.txt"
 FEEDBACK_LOG = LOG_FOLDER / "feedback.txt"
 
-# For feedback messages
 FEEDBACK_PREFIX = "FB:"
 
 
@@ -53,9 +49,7 @@ def ensure_log_folder():
 def log_rating(user, rating: str):
     ensure_log_folder()
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Unknown"
-
     line = f"{datetime.now().isoformat()} | name={full_name} | rating={rating}\n"
-
     with open(RATING_LOG, "a", encoding="utf-8") as f:
         f.write(line)
 
@@ -63,9 +57,7 @@ def log_rating(user, rating: str):
 def log_feedback(user, feedback: str):
     ensure_log_folder()
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Unknown"
-
     line = f"{datetime.now().isoformat()} | name={full_name} | feedback={feedback}\n"
-
     with open(FEEDBACK_LOG, "a", encoding="utf-8") as f:
         f.write(line)
 
@@ -106,9 +98,7 @@ def sync_pdfs_from_drive() -> bool:
 
     running_in_cloud = bool(os.getenv("WEBHOOK_URL"))
 
-    # In Choreo screenshots you mounted:
-    #   client_secrets.json  -> /workspace/client_secrets.json
-    #   credentials.json     -> /workspace/credentials.json
+    # Where Choreo mounts the files
     if running_in_cloud:
         client_secrets_path = "/workspace/client_secrets.json"
         credentials_path = "/workspace/credentials.json"
@@ -116,20 +106,26 @@ def sync_pdfs_from_drive() -> bool:
         client_secrets_path = "client_secrets.json"
         credentials_path = "credentials.json"
 
-    # We IGNORE settings.yaml and give PyDrive2 our own settings
+    # Ignore settings.yaml – configure PyDrive2 fully in code
     settings = {
         "client_config_backend": "file",
         "client_config_file": client_secrets_path,
         "oauth_scope": ["https://www.googleapis.com/auth/drive.readonly"],
         "save_credentials": not running_in_cloud,      # NEVER save in cloud
         "save_credentials_backend": "file",
-        "save_credentials_file": credentials_path,     # local only
+        "save_credentials_file": credentials_path,
         "get_refresh_token": True,
     }
 
     gauth = GoogleAuth(settings=settings)
 
-    # Try to load credentials (if file exists)
+    # Extra safety: in cloud, completely disable SaveCredentialsFile
+    if running_in_cloud:
+        def _no_save_credentials_file(filename: str):
+            print(f"⚠️ [CLOUD] Skipping SaveCredentialsFile('{filename}') on read-only FS")
+        gauth.SaveCredentialsFile = _no_save_credentials_file
+
+    # Try to load credentials (from mounted file)
     try:
         gauth.LoadCredentialsFile(credentials_path)
         print(f"Loaded credentials from {credentials_path}")
@@ -138,13 +134,12 @@ def sync_pdfs_from_drive() -> bool:
 
     if gauth.credentials is None:
         if running_in_cloud:
-            # In cloud we EXPECT a valid credentials.json already mounted
             raise RuntimeError(
-                f"No valid Google Drive credentials found at {credentials_path} "
-                "(check your Choreo config / file mount)."
+                f"No valid Google Drive credentials found at {credentials_path}. "
+                "Check that your `google-drive-credentials` config is mounted "
+                "to /workspace/credentials.json."
             )
         else:
-            # Local dev: do browser auth once
             print("🌐 No credentials found, running LocalWebserverAuth (LOCAL USE ONLY)...")
             gauth.LocalWebserverAuth()
     elif gauth.access_token_expired:
@@ -154,16 +149,13 @@ def sync_pdfs_from_drive() -> bool:
         print("✅ Credentials loaded, authorizing...")
         gauth.Authorize()
 
-    # Only save refreshed credentials LOCALLY.
+    # Only save locally (cloud version is a no-op because of monkey patch)
     if not running_in_cloud:
         try:
             gauth.SaveCredentialsFile(credentials_path)
             print(f"Saved credentials to {credentials_path}")
         except Exception as e:
             print(f"⚠️ Could not save credentials locally: {e}")
-
-    # IMPORTANT: in cloud we never call SaveCredentialsFile,
-    # so there is no [Errno 30] read-only error anymore.
 
     drive = GoogleDrive(gauth)
     folder_id = get_drive_folder_id()
@@ -389,8 +381,8 @@ def format_section_infos(section_code: str) -> str:
         return (
             "⚠️ Failed to sync PDFs from Google Drive.\n"
             f"Error: `{e}`\n"
-            "Make sure Google Drive client secrets, credentials, and "
-            "`DRIVE_FOLDER_ID` are configured correctly."
+            "Make sure Google Drive client secrets, credentials, "
+            "and `DRIVE_FOLDER_ID` are configured correctly."
         )
 
     if not has_files:
@@ -572,21 +564,18 @@ def main():
     application.add_handler(CommandHandler("info", info))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_section))
 
-    webhook_url = os.getenv("WEBHOOK_URL")  # e.g. https://.../default/mrroutine/v1.0
+    webhook_url = os.getenv("WEBHOOK_URL")
     port = int(os.getenv("PORT", "8000"))
 
     if webhook_url:
-        # ▶ Choreo / webhook mode
         print(f"Webhook mode enabled -> {webhook_url}")
-
         application.run_webhook(
             listen="0.0.0.0",
             port=port,
-            url_path=token,  # internal path (ServicePath="/<token>")
-            webhook_url=f"{webhook_url.rstrip('/')}/{token}",  # public Telegram URL
+            url_path=token,
+            webhook_url=f"{webhook_url.rstrip('/')}/{token}",
         )
     else:
-        # ▶ Local dev mode (polling)
         print("WEBHOOK_URL not found -> running in POLLING mode (local test)")
         application.run_polling()
 
