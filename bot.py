@@ -111,21 +111,24 @@ def sync_pdfs_from_drive() -> bool:
         "client_config_backend": "file",
         "client_config_file": client_secrets_path,
         "oauth_scope": ["https://www.googleapis.com/auth/drive.readonly"],
-        "save_credentials": not running_in_cloud,      # NEVER save in cloud
+        "save_credentials": False,          # <- NEVER auto-save anywhere
         "save_credentials_backend": "file",
         "save_credentials_file": credentials_path,
         "get_refresh_token": True,
     }
 
-    gauth = GoogleAuth(settings=settings)
-
-    # Extra safety: in cloud, completely disable SaveCredentialsFile
+    # In cloud: subclass GoogleAuth to completely disable SaveCredentialsFile
     if running_in_cloud:
-        def _no_save_credentials_file(filename: str):
-            print(f"⚠️ [CLOUD] Skipping SaveCredentialsFile('{filename}') on read-only FS")
-        gauth.SaveCredentialsFile = _no_save_credentials_file
+        class NoSaveGoogleAuth(GoogleAuth):
+            def SaveCredentialsFile(self, filename):
+                # Override to avoid any write attempt
+                print(f"⚠️ [CLOUD] Skipping SaveCredentialsFile('{filename}') (read-only FS)")
 
-    # Try to load credentials (from mounted file)
+        gauth = NoSaveGoogleAuth(settings=settings)
+    else:
+        gauth = GoogleAuth(settings=settings)
+
+    # ---- Load credentials from mounted file ----
     try:
         gauth.LoadCredentialsFile(credentials_path)
         print(f"Loaded credentials from {credentials_path}")
@@ -142,20 +145,25 @@ def sync_pdfs_from_drive() -> bool:
         else:
             print("🌐 No credentials found, running LocalWebserverAuth (LOCAL USE ONLY)...")
             gauth.LocalWebserverAuth()
+            # Save only on local machine (we control FS here)
+            try:
+                gauth.SaveCredentialsFile(credentials_path)
+                print(f"Saved credentials locally to {credentials_path}")
+            except Exception as e:
+                print(f"⚠️ Could not save credentials locally: {e}")
     elif gauth.access_token_expired:
         print("🔄 Access token expired, refreshing...")
         gauth.Refresh()
+        if not running_in_cloud:
+            # Only persist refresh on local dev
+            try:
+                gauth.SaveCredentialsFile(credentials_path)
+                print(f"Refreshed credentials saved to {credentials_path}")
+            except Exception as e:
+                print(f"⚠️ Could not save refreshed credentials locally: {e}")
     else:
         print("✅ Credentials loaded, authorizing...")
         gauth.Authorize()
-
-    # Only save locally (cloud version is a no-op because of monkey patch)
-    if not running_in_cloud:
-        try:
-            gauth.SaveCredentialsFile(credentials_path)
-            print(f"Saved credentials to {credentials_path}")
-        except Exception as e:
-            print(f"⚠️ Could not save credentials locally: {e}")
 
     drive = GoogleDrive(gauth)
     folder_id = get_drive_folder_id()
@@ -382,7 +390,7 @@ def format_section_infos(section_code: str) -> str:
             "⚠️ Failed to sync PDFs from Google Drive.\n"
             f"Error: `{e}`\n"
             "Make sure Google Drive client secrets, credentials, "
-            "and `DRIVE_FOLDER_ID` are configured correctly."
+            "and DRIVE_FOLDER_ID are configured correctly."
         )
 
     if not has_files:
